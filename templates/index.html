@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Playlist Curator</title>
+<style>
+  :root {
+    --bg: #121212; --panel: #1c1c1e; --line: #2c2c2e;
+    --text: #f2f2f2; --muted: #9a9aa0; --accent: #1db954; --danger: #ff6b6b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f6f6f7; --panel: #ffffff; --line: #e2e2e5;
+            --text: #18181b; --muted: #6b6b73; --accent: #138a3e; --danger: #c62828; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.3rem; margin: 0 0 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line);
+          border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .now { display: flex; gap: 14px; align-items: center; }
+  .now img { width: 72px; height: 72px; border-radius: 8px; background: var(--line); object-fit: cover; }
+  .now .meta { min-width: 0; flex: 1; }
+  .now .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .now .artist { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-top: 14px; }
+  label { color: var(--muted); font-size: .9rem; display: flex; align-items: center; gap: 8px; }
+  input[type=range] { accent-color: var(--accent); width: 160px; }
+  button { font: inherit; border: 1px solid var(--line); background: transparent; color: var(--text);
+           border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+  li:first-child { border-top: 0; }
+  .score { width: 48px; text-align: right; font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
+  .info { min-width: 0; flex: 1; }
+  .info .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .info .a { color: var(--muted); font-size: .9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tag { font-size: .7rem; color: var(--muted); border: 1px solid var(--line); border-radius: 99px; padding: 1px 8px; margin-left: 6px; }
+  .empty, .status { color: var(--muted); }
+  #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+           background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+           padding: 10px 16px; opacity: 0; pointer-events: none; transition: opacity .2s; max-width: 90vw; }
+  #toast.show { opacity: 1; }
+  #toast.err { border-color: var(--danger); color: var(--danger); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Playlist Curator</h1>
+
+  <section class="card">
+    <div class="now">
+      <img id="art" alt="">
+      <div class="meta">
+        <div class="title" id="title">Nothing playing</div>
+        <div class="artist" id="artist">Start a track in Spotify</div>
+      </div>
+    </div>
+    <div class="controls">
+      <button class="primary" id="find">Find similar</button>
+      <label><input type="checkbox" id="auto"> Auto-update when the song changes</label>
+      <label>Min match <input type="range" id="min" min="0" max="1" step="0.05" value="0.5">
+        <span id="minval">0.50</span></label>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="status" id="status">Press “Find similar” to load matches.</div>
+    <ul id="list"></ul>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let tracks = [];          // all similar tracks from the last lookup
+let lastTrackId = null;   // used to detect song changes
+
+function toast(msg, isErr = false) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.className = "show" + (isErr ? " err" : "");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => (el.className = ""), 3200);
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data;
+}
+
+async function refreshNow() {
+  try {
+    const d = await api("/api/now");
+    if (!d.playing && !d.id) {
+      $("title").textContent = "Nothing playing";
+      $("artist").textContent = "Start a track in Spotify";
+      $("art").removeAttribute("src");
+      return;
+    }
+    $("title").textContent = d.title;
+    $("artist").textContent = d.artist;
+    if (d.art) $("art").src = d.art;
+    if (lastTrackId !== null && d.id !== lastTrackId && $("auto").checked) findSimilar();
+    lastTrackId = d.id;
+  } catch (e) { /* ignore transient poll errors */ }
+}
+
+function render() {
+  const min = parseFloat($("min").value);
+  $("minval").textContent = min.toFixed(2);
+  const shown = tracks.filter((t) => t.match >= min);
+  const list = $("list");
+  list.textContent = "";
+  if (!tracks.length) return;
+  $("status").textContent = shown.length
+    ? `${shown.length} of ${tracks.length} tracks at or above ${min.toFixed(2)}`
+    : `No tracks at or above ${min.toFixed(2)}. Lower the slider to see more.`;
+
+  shown.forEach((t) => {
+    const li = document.createElement("li");
+
+    const score = document.createElement("div");
+    score.className = "score";
+    score.textContent = t.match.toFixed(2);
+
+    const info = document.createElement("div");
+    info.className = "info";
+    const tt = document.createElement("div");
+    tt.className = "t";
+    tt.textContent = t.title;
+    if (t.source === "similar artist") {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = "artist match";
+      tt.appendChild(tag);
+    }
+    const aa = document.createElement("div");
+    aa.className = "a";
+    aa.textContent = t.artist;
+    info.append(tt, aa);
+
+    const q = document.createElement("button");
+    q.textContent = "Queue";
+    q.onclick = () => act("queue", t, q);
+    const p = document.createElement("button");
+    p.textContent = "Play";
+    p.onclick = () => act("play", t, p);
+
+    li.append(score, info, q, p);
+    list.appendChild(li);
+  });
+}
+
+async function act(kind, t, btn) {
+  btn.disabled = true;
+  try {
+    const d = await api(`/api/${kind}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ artist: t.artist, title: t.title }),
+    });
+    toast(`${kind === "queue" ? "Queued" : "Playing"}: ${d.label}`);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function findSimilar() {
+  const btn = $("find");
+  btn.disabled = true;
+  $("status").textContent = "Looking up similar tracks…";
+  try {
+    const d = await api("/api/similar");
+    tracks = d.tracks;
+    if (!tracks.length) $("status").textContent = "Last.fm returned nothing for this track.";
+    render();
+  } catch (e) {
+    tracks = [];
+    $("list").textContent = "";
+    $("status").textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("find").onclick = findSimilar;
+$("min").oninput = render;
+refreshNow();
+setInterval(refreshNow, 5000);
+</script>
+</body>
+</html>
